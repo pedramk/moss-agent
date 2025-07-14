@@ -1,0 +1,20 @@
+syntax = "proto3";
+package capture;
+
+service CaptureService {
+  rpc Start(Empty) returns (Status);
+  rpc Stop(Empty) returns (Status);
+  rpc StreamEvents(Empty) returns (stream Event);
+}
+
+message Empty {}
+
+message Status {
+  string message = 1;
+}
+
+message Event {
+  string name = 1;
+  string timestamp = 2;
+  string details = 3;
+}

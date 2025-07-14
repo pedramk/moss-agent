@@ -1,0 +1,15 @@
+# IDEs and build tools
+/target/
+/Cargo.lock
+.idea/
+.vscode/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Dependencies
+/vendor/
+
+# Crates.io related files
+*.crate
