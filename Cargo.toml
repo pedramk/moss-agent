@@ -8,10 +8,7 @@ tokio = { version = "1", features = ["full"] }
 tonic = "0.11"
 prost = "0.12"
 rdev = "0.5"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 futures-core = "0.3"
-tokio-stream = "0.1"
 async-stream = "0.3"
 chrono = "0.4"
 
