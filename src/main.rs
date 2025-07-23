@@ -51,7 +51,10 @@ impl CaptureService for MyCaptureService {
                     *system_info.lock().await = Some(info);
                     
                     if let Err(e) = broadcaster.send(system_event) {
-                        eprintln!("[ERROR] Failed to send system info: {}", e);
+                        // Only log if it's not a "no receivers" error
+                        if !e.to_string().contains("channel closed") {
+                            eprintln!("[ERROR] Failed to send system info: {}", e);
+                        }
                     }
                 }
                 Err(e) => {
@@ -156,7 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // -------------------------------------
     
     let (broadcaster, _) = broadcast::channel(1024);
-    let capturing = Arc::new(AtomicBool::new(true)); // Start with capturing on
+    let capturing = Arc::new(AtomicBool::new(false)); // Start with capturing off until client connects
     let listener_handle = Arc::new(Mutex::new(None));
 
     let mouse_move_interval = Arc::new(Mutex::new(0.05f64)); // in seconds
@@ -232,7 +235,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             details: event_details,
                         };
                         if let Err(e) = tx.send(cap_event) {
-                            eprintln!("[ERROR] Failed to send event: {}", e);
+                            // Only log if it's not a "no receivers" error
+                            if !e.to_string().contains("channel closed") {
+                                eprintln!("[ERROR] Failed to send event: {}", e);
+                            }
                         }
                     }
                 }
@@ -267,7 +273,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
                                 
                                 if let Err(e) = tx.send(change_event) {
-                                    eprintln!("[ERROR] Failed to send system info change: {}", e);
+                                    // Only log if it's not a "no receivers" error
+                                    if !e.to_string().contains("channel closed") {
+                                        eprintln!("[ERROR] Failed to send system info change: {}", e);
+                                    }
                                 }
                             }
                         }

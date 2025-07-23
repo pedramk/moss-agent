@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashMap;
 use std::process::Command;
 use std::str;
 
@@ -31,6 +32,7 @@ pub struct PciDevice {
     pub id: String,
     #[serde(rename = "type")]
     pub device_type: String,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,130 +60,141 @@ pub struct VideoCard {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Monitor {
-    pub name: String,
-    pub serial: String,
+    pub model: Option<String>, // The real human-readable model, e.g., "MSI MP271A"
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UsbDevice {
     pub name: String,
-    pub vendor_id: String,
-    pub product_id: String,
+    pub vendor_id: Option<String>,
+    pub product_id: Option<String>,
 }
 
 impl SystemInfo {
     pub fn collect() -> Result<Self, String> {
-        let directx_version = get_directx_version()?;
-        let pci_devices = get_pci_devices()?;
-        let memory_mb = get_memory_info()?;
-        let physical_model = get_physical_hardware_info()?;
-        let drives = get_drive_info()?;
-        let network_info = get_network_info()?;
-        let video_cards = get_video_cards()?;
-        let monitors = get_monitors()?;
-        let usb_devices = get_usb_devices()?;
-        let processor_info = get_processor_info()?;
-        
-        // Get OS version and real OS name
-        let (os_version, real_os) = get_os_info()?;
-        
-        // Get machine signature and user info
-        let machine_signature = get_machine_signature()?;
-        let user = get_user_info()?;
-        
         Ok(SystemInfo {
             system_info: SystemInfoCore {
-                directx_version,
-                os_version,
-                real_os,
-                memory_mb,
-                physical_model,
-                machine_signature,
-                user,
+                directx_version: get_directx_version()?,
+                os_version: get_os_info()?.0,
+                real_os: get_os_info()?.1,
+                memory_mb: get_memory_info()?,
+                physical_model: get_physical_hardware_info()?,
+                machine_signature: get_machine_signature()?,
+                user: get_user_info()?,
                 monitor_start_time: chrono::Utc::now().to_rfc3339(),
             },
-            pci_devices,
-            drives,
-            network_info,
-            video_cards,
-            monitors,
-            usb_input_devices: usb_devices,
-            processor_info,
+            pci_devices: get_pci_devices()?,
+            drives: get_drive_info()?,
+            network_info: get_network_info()?,
+            video_cards: get_video_cards()?,
+            monitors: get_monitors()?,
+            usb_input_devices: get_usb_devices()?,
+            processor_info: get_processor_info()?,
         })
     }
-    
+
     pub fn to_formatted_string(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_else(|_| "Failed to serialize system info".to_string())
+        serde_json::to_string_pretty(self)
+            .unwrap_or_else(|_| "Failed to serialize system info".to_string())
     }
+}
+
+/// Helper: Parse WMIC output into a vector of hashmaps (one hashmap per device/block).
+fn parse_wmic_output(output: &str) -> Vec<HashMap<String, String>> {
+    let mut blocks = Vec::new();
+    let mut current = HashMap::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            if !current.is_empty() {
+                blocks.push(current.clone());
+                current.clear();
+            }
+        } else if let Some((key, val)) = line.split_once('=') {
+            current.insert(key.trim().to_string(), val.trim().to_string());
+        }
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+    blocks
 }
 
 fn get_directx_version() -> Result<String, String> {
-    let _output = Command::new("dxdiag")
-         .args(["/t", "dxdiag_temp.txt"])
-         .output()
-         .map_err(|e| e.to_string())?;
-     
-     // For now, return a default since dxdiag requires GUI
-     Ok("DirectX 12".to_string())
+    Ok("DirectX 12".to_string())
 }
-
-
 
 fn get_pci_devices() -> Result<Vec<PciDevice>, String> {
     let output = Command::new("wmic")
-        .args(["path", "win32_pnpentity", "where", "DeviceID like 'PCI%'", "get", "DeviceID", "/format:list"])
+        .args([
+            "path",
+            "win32_pnpentity",
+            "where",
+            "DeviceID like 'PCI%'",
+            "get",
+            "DeviceID,Name",
+            "/format:list",
+        ])
         .output()
-        .map_err(|e| e.to_string())?;
-    
-    let output_str = str::from_utf8(&output.stdout)
-        .map_err(|e| e.to_string())?;
-    
+        .map_err(|e| format!("WMIC error: {e}"))?;
+
+    let output_str = str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
+    let blocks = parse_wmic_output(output_str);
     let mut devices = Vec::new();
-     for line in output_str.lines() {
-         if line.starts_with("DeviceID=") && line.contains("PCI") {
-             if let Some(device_id) = line.split('=').nth(1) {
-                 // Extract vendor and device ID from PCI path
-                 if let Some(pci_part) = device_id.split('\\').find(|s| s.starts_with("VEN_")) {
-                     let mut device_type = "unknown".to_string();
-                     
-                     // Determine device type based on class or description
-                     if device_id.to_lowercase().contains("display") || device_id.to_lowercase().contains("vga") {
-                         device_type = "display".to_string();
-                     } else if device_id.to_lowercase().contains("network") || device_id.to_lowercase().contains("ethernet") {
-                         device_type = "network".to_string();
-                     } else if device_id.to_lowercase().contains("storage") || device_id.to_lowercase().contains("ide") || device_id.to_lowercase().contains("sata") {
-                         device_type = "storage".to_string();
-                     }
-                     
-                     // Extract VEN and DEV IDs
-                     let mut vendor_id = String::new();
-                     let mut device_id_part = String::new();
-                     
-                     if let Some(ven_start) = pci_part.find("VEN_") {
-                         vendor_id = pci_part[ven_start+4..ven_start+8].to_string();
-                     }
-                     if let Some(dev_start) = pci_part.find("DEV_") {
-                         device_id_part = pci_part[dev_start+4..dev_start+8].to_string();
-                     }
-                     
-                     if !vendor_id.is_empty() && !device_id_part.is_empty() {
-                         devices.push(PciDevice {
-                             id: format!("{}-{}", vendor_id, device_id_part),
-                             device_type,
-                         });
-                     }
-                 }
-             }
-         }
-     }
-     
-     if devices.is_empty() {
-         devices.push(PciDevice {
-             id: "Unknown".to_string(),
-             device_type: "unknown".to_string(),
-         });
-     }
-    
+
+    for mut block in blocks {
+        let device_id = block
+            .remove("DeviceID")
+            .unwrap_or_else(|| "Unknown".to_string());
+        let name = block.remove("Name");
+
+        // Heuristic for device type
+        let dtype = if device_id.to_lowercase().contains("display")
+            || device_id.to_lowercase().contains("vga")
+        {
+            "display"
+        } else if device_id.to_lowercase().contains("network")
+            || device_id.to_lowercase().contains("ethernet")
+        {
+            "network"
+        } else if device_id.to_lowercase().contains("storage")
+            || device_id.to_lowercase().contains("ide")
+            || device_id.to_lowercase().contains("sata")
+        {
+            "storage"
+        } else {
+            "unknown"
+        };
+
+        // Extract VEN/DEV
+        let (mut vendor_id, mut device_id_part) = (None, None);
+        if let Some(pci_part) = device_id.split('\\').find(|s| s.starts_with("VEN_")) {
+            if let Some(ven_start) = pci_part.find("VEN_") {
+                vendor_id = Some(pci_part[ven_start + 4..ven_start + 8].to_string());
+            }
+            if let Some(dev_start) = pci_part.find("DEV_") {
+                device_id_part = Some(pci_part[dev_start + 4..dev_start + 8].to_string());
+            }
+        }
+        let id = if let (Some(ven), Some(dev)) = (vendor_id, device_id_part) {
+            format!("{}-{}", ven, dev)
+        } else {
+            device_id.clone()
+        };
+
+        devices.push(PciDevice {
+            id,
+            device_type: dtype.to_string(),
+            name,
+        });
+    }
+    if devices.is_empty() {
+        devices.push(PciDevice {
+            id: "Unknown".to_string(),
+            device_type: "unknown".to_string(),
+            name: None,
+        });
+    }
     Ok(devices)
 }
 
@@ -189,54 +202,35 @@ fn get_memory_info() -> Result<u64, String> {
     let output = Command::new("wmic")
         .args(["computersystem", "get", "TotalPhysicalMemory", "/value"])
         .output()
-        .map_err(|e| e.to_string())?;
-    
-    let output_str = str::from_utf8(&output.stdout)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("WMIC error: {e}"))?;
+
+    let output_str = str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
     for line in output_str.lines() {
         if line.starts_with("TotalPhysicalMemory=") {
             let memory_str = line.split('=').nth(1).unwrap_or("0");
             if let Ok(memory_bytes) = memory_str.parse::<u64>() {
-                return Ok(memory_bytes / 1024 / 1024); // Convert to MB
+                return Ok(memory_bytes / 1024 / 1024);
             }
         }
     }
-    
-    // Fallback: try systeminfo command
-    let output2 = Command::new("systeminfo")
-        .output()
-        .map_err(|e| e.to_string())?;
-    
-    let output_str2 = str::from_utf8(&output2.stdout)
-        .map_err(|e| e.to_string())?;
-    
-    for line in output_str2.lines() {
-        if line.contains("Total Physical Memory:") {
-            // Extract memory value from systeminfo output
-            if let Some(memory_part) = line.split(':').nth(1) {
-                let memory_str = memory_part.trim().replace(",", "").replace(" MB", "");
-                if let Ok(memory_mb) = memory_str.parse::<u64>() {
-                    return Ok(memory_mb);
-                }
-            }
-        }
-    }
-    
-    Ok(16004) // Default fallback
+    Ok(16004) // Fallback
 }
 
 fn get_physical_hardware_info() -> Result<String, String> {
     let output = Command::new("wmic")
-        .args(["computersystem", "get", "Manufacturer,Model", "/format:list"])
+        .args([
+            "computersystem",
+            "get",
+            "Manufacturer,Model",
+            "/format:list",
+        ])
         .output()
-        .map_err(|e| e.to_string())?;
-    
-    let output_str = str::from_utf8(&output.stdout)
-        .map_err(|e| e.to_string())?;
-    
+        .map_err(|e| format!("WMIC error: {e}"))?;
+    let output_str = str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
+
     let mut manufacturer = String::new();
     let mut model = String::new();
-    
+
     for line in output_str.lines() {
         if line.starts_with("Manufacturer=") {
             manufacturer = line.split('=').nth(1).unwrap_or("").to_string();
@@ -244,146 +238,107 @@ fn get_physical_hardware_info() -> Result<String, String> {
             model = line.split('=').nth(1).unwrap_or("").to_string();
         }
     }
-    
-    // Get BIOS serial number
+
     let bios_output = Command::new("wmic")
         .args(["bios", "get", "SerialNumber", "/format:list"])
         .output()
-        .map_err(|e| e.to_string())?;
-    
-    let bios_str = str::from_utf8(&bios_output.stdout)
-        .map_err(|e| e.to_string())?;
-    
-    let mut serial = String::new();
-    for line in bios_str.lines() {
-        if line.starts_with("SerialNumber=") {
-            serial = line.split('=').nth(1).unwrap_or("").to_string();
-            break;
-        }
-    }
-    
+        .map_err(|e| format!("WMIC error: {e}"))?;
+    let bios_str = str::from_utf8(&bios_output.stdout).map_err(|e| e.to_string())?;
+    let serial = bios_str
+        .lines()
+        .find_map(|l| l.strip_prefix("SerialNumber=").map(|s| s.to_string()))
+        .unwrap_or_default();
+
     Ok(format!("{} {} {}", manufacturer, model, serial))
 }
 
 fn get_os_info() -> Result<(String, String), String> {
-    // Get OS version
-    let version_output = Command::new("wmic")
+    let output = Command::new("wmic")
         .args(["os", "get", "Version,Caption", "/format:list"])
         .output()
-        .map_err(|e| e.to_string())?;
-    
-    let version_str = str::from_utf8(&version_output.stdout)
-        .map_err(|e| e.to_string())?;
-    
-    let mut os_version = String::new();
-    let mut real_os = String::new();
-    
-    for line in version_str.lines() {
+        .map_err(|e| format!("WMIC error: {e}"))?;
+    let output_str = str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
+
+    let mut os_version = None;
+    let mut real_os = None;
+    for line in output_str.lines() {
         if line.starts_with("Version=") {
-            os_version = line.split('=').nth(1).unwrap_or("").to_string();
+            os_version = Some(line.split('=').nth(1).unwrap_or("").to_string());
         } else if line.starts_with("Caption=") {
-            real_os = line.split('=').nth(1).unwrap_or("").to_string();
+            real_os = Some(line.split('=').nth(1).unwrap_or("").to_string());
         }
     }
-    
-    if os_version.is_empty() {
-        os_version = "Unknown".to_string();
-    }
-    if real_os.is_empty() {
-        real_os = "Unknown Windows".to_string();
-    }
-    
-    Ok((os_version, real_os))
+    Ok((
+        os_version.unwrap_or_else(|| "Unknown".to_string()),
+        real_os.unwrap_or_else(|| "Unknown Windows".to_string()),
+    ))
 }
 
 fn get_machine_signature() -> Result<String, String> {
-    // Get machine GUID from registry or system
     let output = Command::new("wmic")
         .args(["csproduct", "get", "UUID", "/format:list"])
         .output()
-        .map_err(|e| e.to_string())?;
-    
-    let output_str = str::from_utf8(&output.stdout)
-        .map_err(|e| e.to_string())?;
-    
+        .map_err(|e| format!("WMIC error: {e}"))?;
+    let output_str = str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
     for line in output_str.lines() {
-        if line.starts_with("UUID=") {
-            let uuid = line.split('=').nth(1).unwrap_or("").trim();
+        if let Some(uuid) = line.strip_prefix("UUID=") {
+            let uuid = uuid.trim();
             if !uuid.is_empty() && uuid != "(null)" {
                 return Ok(format!("{{{}}}", uuid));
             }
         }
     }
-    
     Ok("{Unknown-Machine-ID}".to_string())
 }
 
 fn get_user_info() -> Result<String, String> {
-    // Get current user and computer name
-    let user_output = Command::new("whoami")
+    let output = Command::new("whoami")
         .output()
-        .map_err(|e| e.to_string())?;
-    
-    let user_str = str::from_utf8(&user_output.stdout)
-        .map_err(|e| e.to_string())?;
-    
-    let user = user_str.trim().to_string();
-    
+        .map_err(|e| format!("whoami error: {e}"))?;
+    let user_str = str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
+    let user = user_str.trim();
     if user.is_empty() {
         Ok("Unknown@UNKNOWN".to_string())
     } else {
-        Ok(user)
+        Ok(user.to_string())
     }
 }
 
 fn get_drive_info() -> Result<Vec<DriveInfo>, String> {
-    // Get serial numbers for physical drives (focus on system drive)
-    let serial_output = Command::new("wmic")
+    let output = Command::new("wmic")
         .args(["diskdrive", "get", "SerialNumber", "/format:list"])
         .output()
-        .map_err(|e| e.to_string())?;
-    
-    let serial_str = str::from_utf8(&serial_output.stdout)
-        .map_err(|e| e.to_string())?;
-    
+        .map_err(|e| format!("WMIC error: {e}"))?;
+    let output_str = str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
     let mut drives = Vec::new();
-      
-    for line in serial_str.lines() {
-        if line.starts_with("SerialNumber=") {
-            let serial = line.split('=').nth(1).unwrap_or("").trim().to_string();
+    for line in output_str.lines() {
+        if let Some(serial) = line.strip_prefix("SerialNumber=") {
+            let serial = serial.trim();
             if !serial.is_empty() && serial != "(null)" {
                 drives.push(DriveInfo {
-                    serial,
+                    serial: serial.to_string(),
                 });
             }
         }
     }
-    
-    // If no drives found, add a placeholder
     if drives.is_empty() {
         drives.push(DriveInfo {
             serial: "Unknown".to_string(),
         });
     }
-    
     Ok(drives)
 }
 
 fn get_network_info() -> Result<NetworkInfo, String> {
     let output = Command::new("ipconfig")
         .output()
-        .map_err(|e| e.to_string())?;
-    
-    let output_str = str::from_utf8(&output.stdout)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("ipconfig error: {e}"))?;
+    let output_str = str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
     let mut local_ip = "Unknown".to_string();
-    
-    // Parse ipconfig output for local IP
     for line in output_str.lines() {
-        if line.contains("IPv4 Address") {
+        if line.contains("IPv4 Address") || line.contains("IPv4-Adresse") {
             if let Some(ip_part) = line.split(':').nth(1) {
                 let ip = ip_part.trim();
-                // Skip loopback and APIPA addresses
                 if !ip.starts_with("127.") && !ip.starts_with("169.254.") {
                     local_ip = ip.to_string();
                     break;
@@ -391,28 +346,29 @@ fn get_network_info() -> Result<NetworkInfo, String> {
             }
         }
     }
-    
-    // Try to get public IP (this is a simplified approach)
-     let public_ip = match Command::new("nslookup")
-         .args(["myip.opendns.com", "resolver1.opendns.com"])
-         .output() {
-         Ok(output) => {
-             let output_str = str::from_utf8(&output.stdout).unwrap_or("");
-             // Parse nslookup output for public IP
-             let mut found_ip = "Unknown".to_string();
-             for line in output_str.lines() {
-                 if line.starts_with("Address:") && !line.contains("#") {
-                     if let Some(ip) = line.split(':').nth(1) {
-                         found_ip = ip.trim().to_string();
-                         break;
-                     }
-                 }
-             }
-             found_ip
-         },
-         Err(_) => "Unknown".to_string(),
-     };
-    
+
+    let public_ip = match Command::new("nslookup")
+        .args(["myip.opendns.com", "resolver1.opendns.com"])
+        .output()
+    {
+        Ok(output) => {
+            let output_str = str::from_utf8(&output.stdout).unwrap_or("");
+            let mut found_ip = "Unknown".to_string();
+            for line in output_str.lines() {
+                if line.starts_with("Address:") && !line.contains("#") {
+                    if let Some(ip) = line.split(':').nth(1) {
+                        let ip = ip.trim();
+                        if ip.chars().filter(|c| *c == '.').count() == 3 {
+                            found_ip = ip.to_string();
+                            break;
+                        }
+                    }
+                }
+            }
+            found_ip
+        }
+        Err(_) => "Unknown".to_string(),
+    };
     Ok(NetworkInfo {
         local_ip,
         public_ip,
@@ -421,224 +377,211 @@ fn get_network_info() -> Result<NetworkInfo, String> {
 
 fn get_video_cards() -> Result<Vec<VideoCard>, String> {
     let output = Command::new("wmic")
-        .args(["path", "win32_videocontroller", "get", "Name,DriverVersion", "/format:list"])
+        .args([
+            "path",
+            "win32_videocontroller",
+            "get",
+            "Name,DriverVersion",
+            "/format:list",
+        ])
         .output()
-        .map_err(|e| e.to_string())?;
-    
-    let output_str = str::from_utf8(&output.stdout)
-        .map_err(|e| e.to_string())?;
-    
-    let mut video_cards = Vec::new();
-    let mut current_card = VideoCard {
-         name: String::new(),
-         driver_version: String::new(),
-     };
-    
-    for line in output_str.lines() {
-        if line.starts_with("DriverVersion=") {
-            current_card.driver_version = line.split('=').nth(1).unwrap_or("").to_string();
-            if !current_card.name.is_empty() {
-                video_cards.push(current_card.clone());
-                current_card = VideoCard {
-                     name: String::new(),
-                     driver_version: String::new(),
-                 };
-            }
-        } else if line.starts_with("Name=") {
-            current_card.name = line.split('=').nth(1).unwrap_or("").to_string();
-        }
+        .map_err(|e| format!("WMIC error: {e}"))?;
+
+    let output_str = str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
+    let blocks = parse_wmic_output(output_str);
+    let mut cards = Vec::new();
+    for block in blocks {
+        let name = block
+            .get("Name")
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string());
+        let driver_version = block.get("DriverVersion").cloned().unwrap_or_default();
+        cards.push(VideoCard {
+            name,
+            driver_version,
+        });
     }
-    
-    if !current_card.name.is_empty() {
-        video_cards.push(current_card);
-    }
-    
-    Ok(video_cards)
+    Ok(cards)
 }
 
+/// Uses WMI to extract monitor model info from EDID data
 fn get_monitors() -> Result<Vec<Monitor>, String> {
-    let output = Command::new("wmic")
-        .args(["desktopmonitor", "get", "Name,MonitorManufacturer,MonitorType", "/format:list"])
+    // First try to get monitor info from WmiMonitorID which contains EDID data
+    let output = Command::new("powershell")
+        .args(&[
+            "-Command",
+            "Get-WmiObject -Namespace root/wmi -Class WmiMonitorID | Select-Object -ExpandProperty UserFriendlyName",
+        ])
         .output()
-        .map_err(|e| e.to_string())?;
-    
-    let output_str = str::from_utf8(&output.stdout)
-        .map_err(|e| e.to_string())?;
-    
+        .map_err(|e| format!("PowerShell WmiMonitorID error: {e}"))?;
+
+    let output_str = str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
     let mut monitors = Vec::new();
-    let mut current_monitor = Monitor {
-        name: String::new(),
-        serial: String::new(),
-    };
+
+    // Parse the output - each byte is on a separate line
+    let lines: Vec<&str> = output_str.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let mut current_bytes = Vec::new();
     
-    for line in output_str.lines() {
-        if line.starts_with("Name=") {
-            if !current_monitor.name.is_empty() {
-                monitors.push(current_monitor.clone());
+    for line in lines {
+        if let Ok(byte_val) = line.parse::<u8>() {
+            current_bytes.push(byte_val);
+            // If we hit a null terminator (0), we've reached the end of a monitor name
+            if byte_val == 0 {
+                if let Some(model_name) = decode_byte_array(&current_bytes) {
+                    if !model_name.is_empty() && model_name != "Generic PnP Monitor" {
+                        monitors.push(Monitor { model: Some(model_name) });
+                    }
+                }
+                current_bytes.clear();
             }
-            current_monitor = Monitor {
-                name: line.split('=').nth(1).unwrap_or("Unknown Monitor").to_string(),
-                serial: "Unknown".to_string(),
-            };
         }
     }
     
-    if !current_monitor.name.is_empty() {
-        monitors.push(current_monitor);
+    // Handle case where there's no null terminator at the end
+    if !current_bytes.is_empty() {
+        if let Some(model_name) = decode_byte_array(&current_bytes) {
+            if !model_name.is_empty() && model_name != "Generic PnP Monitor" {
+                monitors.push(Monitor { model: Some(model_name) });
+            }
+        }
     }
-    
-    // Try to get monitor serial numbers from WMI
-    let serial_output = Command::new("wmic")
-        .args(["path", "Win32_DesktopMonitor", "get", "SerialNumberID", "/format:list"])
-        .output();
-    
-    if let Ok(serial_out) = serial_output {
-        if let Ok(serial_str) = str::from_utf8(&serial_out.stdout) {
-            let mut serial_index = 0;
-            for line in serial_str.lines() {
-                if line.starts_with("SerialNumberID=") {
-                    let serial = line.split('=').nth(1).unwrap_or("");
-                    if !serial.is_empty() && serial_index < monitors.len() {
-                        monitors[serial_index].serial = serial.to_string();
-                        serial_index += 1;
-                    }
+
+    // Fallback to desktopmonitor if WmiMonitorID didn't work
+    if monitors.is_empty() {
+        let fallback_output = Command::new("wmic")
+            .args(&[
+                "desktopmonitor",
+                "get",
+                "Caption",
+                "/format:list",
+            ])
+            .output()
+            .map_err(|e| format!("WMIC desktopmonitor error: {e}"))?;
+
+        let fallback_str = str::from_utf8(&fallback_output.stdout).map_err(|e| e.to_string())?;
+        let fallback_blocks = parse_wmic_output(fallback_str);
+
+        for block in fallback_blocks {
+            if let Some(caption) = block.get("Caption") {
+                let model = caption.trim().to_string();
+                if !model.is_empty() && model != "Default Monitor Type" {
+                    monitors.push(Monitor { model: Some(model) });
                 }
             }
         }
     }
-    
-    // Fallback if no monitors found
+
     if monitors.is_empty() {
         monitors.push(Monitor {
-            name: "Primary Display".to_string(),
-            serial: "Unknown".to_string(),
+            model: Some("Unknown".to_string()),
         });
     }
-    
     Ok(monitors)
 }
 
+/// Decode byte array to readable text
+fn decode_byte_array(bytes: &[u8]) -> Option<String> {
+    if bytes.is_empty() {
+        return None;
+    }
+    
+    // Convert bytes to string, stopping at null terminator
+    let mut result = String::new();
+    for &byte in bytes {
+        if byte == 0 {
+            break;
+        }
+        if byte.is_ascii() && byte >= 32 {
+            result.push(byte as char);
+        }
+    }
+    
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+// Removed decode_powershell_edid_field as it's no longer needed for WMIC output
+// fn decode_powershell_edid_field(field: &str) -> String { ... }
+
 fn get_usb_devices() -> Result<Vec<UsbDevice>, String> {
     let output = Command::new("wmic")
-        .args(["path", "Win32_USBControllerDevice", "get", "Dependent", "/format:list"])
+        .args([
+            "path",
+            "Win32_PnPEntity",
+            "where",
+            "DeviceID like 'USB%'",
+            "get",
+            "Name,DeviceID,Description",
+            "/format:list",
+        ])
         .output()
-        .map_err(|e| e.to_string())?;
-    
-    let output_str = str::from_utf8(&output.stdout)
-        .map_err(|e| e.to_string())?;
-    
-    let mut usb_devices = Vec::new();
-    
-    for line in output_str.lines() {
-        if line.starts_with("Dependent=") && line.contains("USB") {
-            if let Some(device_path) = line.split('=').nth(1) {
-                // Extract device information from the path
-                if device_path.contains("VID_") && device_path.contains("PID_") {
-                    let mut vendor_id = String::new();
-                    let mut product_id = String::new();
-                    
-                    // Extract VID and PID
-                    if let Some(vid_start) = device_path.find("VID_") {
-                        vendor_id = device_path[vid_start+4..vid_start+8].to_string();
-                    }
-                    if let Some(pid_start) = device_path.find("PID_") {
-                        product_id = device_path[pid_start+4..pid_start+8].to_string();
-                    }
-                    
-                    usb_devices.push(UsbDevice {
-                        name: "USB Device".to_string(), // Generic name, could be enhanced
-                        vendor_id,
-                        product_id,
-                    });
-                }
-            }
+        .map_err(|e| format!("WMIC error: {e}"))?;
+    let output_str = str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
+
+    let blocks = parse_wmic_output(output_str);
+    let mut devices = Vec::new();
+
+    for block in blocks {
+        let name = block
+            .get("Name")
+            .cloned()
+            .unwrap_or_else(|| "USB Device".to_string());
+        let device_id = block.get("DeviceID").cloned().unwrap_or_default();
+
+        let (mut vendor_id, mut product_id) = (None, None);
+        if let Some(vid_start) = device_id.find("VID_") {
+            vendor_id = device_id
+                .get(vid_start + 4..vid_start + 8)
+                .map(|s| s.to_string());
         }
-    }
-    
-    // Alternative approach using PnP devices
-    if usb_devices.is_empty() {
-        let pnp_output = Command::new("wmic")
-            .args(["path", "Win32_PnPEntity", "where", "DeviceID like 'USB%'", "get", "Name,DeviceID", "/format:list"])
-            .output()
-            .map_err(|e| e.to_string())?;
-        
-        let pnp_str = str::from_utf8(&pnp_output.stdout)
-            .map_err(|e| e.to_string())?;
-        
-        let mut current_device = UsbDevice {
-            name: String::new(),
-            vendor_id: String::new(),
-            product_id: String::new(),
-        };
-        
-        for line in pnp_str.lines() {
-            if line.starts_with("DeviceID=") && line.contains("VID_") {
-                let device_id = line.split('=').nth(1).unwrap_or("");
-                
-                // Extract VID and PID
-                if let Some(vid_start) = device_id.find("VID_") {
-                    current_device.vendor_id = device_id[vid_start+4..vid_start+8].to_string();
-                }
-                if let Some(pid_start) = device_id.find("PID_") {
-                    current_device.product_id = device_id[pid_start+4..pid_start+8].to_string();
-                }
-            } else if line.starts_with("Name=") {
-                current_device.name = line.split('=').nth(1).unwrap_or("USB Device").to_string();
-                
-                if !current_device.vendor_id.is_empty() {
-                    usb_devices.push(current_device.clone());
-                }
-                
-                current_device = UsbDevice {
-                    name: String::new(),
-                    vendor_id: String::new(),
-                    product_id: String::new(),
-                };
-            }
+        if let Some(pid_start) = device_id.find("PID_") {
+            product_id = device_id
+                .get(pid_start + 4..pid_start + 8)
+                .map(|s| s.to_string());
         }
+
+        devices.push(UsbDevice {
+            name,
+            vendor_id,
+            product_id,
+        });
     }
-    
-    Ok(usb_devices)
+    Ok(devices)
 }
 
 fn get_processor_info() -> Result<ProcessorInfo, String> {
     let output = Command::new("wmic")
         .args(["cpu", "get", "Name,MaxClockSpeed", "/format:list"])
         .output()
-        .map_err(|e| e.to_string())?;
-    
-    let output_str = str::from_utf8(&output.stdout)
-        .map_err(|e| e.to_string())?;
-    
+        .map_err(|e| format!("WMIC error: {e}"))?;
+    let output_str = str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
+    let blocks = parse_wmic_output(output_str);
+
     let mut cpu_name = String::new();
-     let mut cpu_cores = 0;
-     
-     for line in output_str.lines() {
-         if line.starts_with("Name=") {
-             cpu_name = line.split('=').nth(1).unwrap_or("").to_string();
-         }
-     }
-     
-     // Get CPU core count
-     let core_output = Command::new("wmic")
-         .args(["cpu", "get", "NumberOfLogicalProcessors", "/format:list"])
-         .output()
-         .map_err(|e| e.to_string())?;
-     
-     let core_str = str::from_utf8(&core_output.stdout)
-         .map_err(|e| e.to_string())?;
-     
-     for line in core_str.lines() {
-         if line.starts_with("NumberOfLogicalProcessors=") {
-             if let Ok(cores) = line.split('=').nth(1).unwrap_or("0").parse::<u32>() {
-                 cpu_cores = cores;
-                 break;
-             }
-         }
-     }
-     
-     Ok(ProcessorInfo {
-         cpu_model: cpu_name,
-         cpu_cores,
-     })
+    for block in blocks {
+        cpu_name = block.get("Name").cloned().unwrap_or_default();
+        break;
+    }
+
+    let core_output = Command::new("wmic")
+        .args(["cpu", "get", "NumberOfLogicalProcessors", "/format:list"])
+        .output()
+        .map_err(|e| format!("WMIC error: {e}"))?;
+    let core_str = str::from_utf8(&core_output.stdout).map_err(|e| e.to_string())?;
+    let mut cpu_cores = 0;
+    for line in core_str.lines() {
+        if let Some(val) = line.strip_prefix("NumberOfLogicalProcessors=") {
+            if let Ok(cores) = val.trim().parse::<u32>() {
+                cpu_cores = cores;
+                break;
+            }
+        }
+    }
+    Ok(ProcessorInfo {
+        cpu_model: cpu_name,
+        cpu_cores,
+    })
 }
