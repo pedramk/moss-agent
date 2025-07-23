@@ -9,12 +9,12 @@ use tonic::{transport::Server, Request, Response, Status};
 use capture::capture_service_server::{CaptureService, CaptureServiceServer};
 use capture::{Empty, Event, Status as RpcStatus};
 
-use rdev::{listen, EventType, Event as RdevEvent, Key, Button};
 use chrono::Local;
-use tokio::sync::Mutex;
-use std::collections::HashSet;
+use rdev::{listen, Button, Event as RdevEvent, EventType, Key};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 mod system_info;
 use system_info::SystemInfo;
@@ -34,7 +34,7 @@ impl CaptureService for MyCaptureService {
     async fn start(&self, _: Request<Empty>) -> Result<Response<RpcStatus>, Status> {
         self.capturing.store(true, Ordering::Relaxed);
         println!("[INFO] Event capturing started");
-        
+
         // Collect and send system information in a separate task
         let broadcaster = self.broadcaster.clone();
         let system_info = self.system_info.clone();
@@ -46,10 +46,10 @@ impl CaptureService for MyCaptureService {
                         timestamp: Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
                         details: info.to_formatted_string(),
                     };
-                    
+
                     // Store system info for change monitoring
                     *system_info.lock().await = Some(info);
-                    
+
                     if let Err(e) = broadcaster.send(system_event) {
                         // Only log if it's not a "no receivers" error
                         if !e.to_string().contains("channel closed") {
@@ -62,19 +62,27 @@ impl CaptureService for MyCaptureService {
                 }
             }
         });
-        
-        Ok(Response::new(RpcStatus { message: "Started".into() }))
+
+        Ok(Response::new(RpcStatus {
+            message: "Started".into(),
+        }))
     }
 
     async fn stop(&self, _: Request<Empty>) -> Result<Response<RpcStatus>, Status> {
         self.capturing.store(false, Ordering::Relaxed);
         println!("[INFO] Event capturing stopped");
-        Ok(Response::new(RpcStatus { message: "Stopped".into() }))
+        Ok(Response::new(RpcStatus {
+            message: "Stopped".into(),
+        }))
     }
 
-    type StreamEventsStream = Pin<Box<dyn Stream<Item = Result<Event, Status>> + Send + Sync + 'static>>;
+    type StreamEventsStream =
+        Pin<Box<dyn Stream<Item = Result<Event, Status>> + Send + Sync + 'static>>;
 
-    async fn stream_events(&self, _: Request<Empty>) -> Result<Response<Self::StreamEventsStream>, Status> {
+    async fn stream_events(
+        &self,
+        _: Request<Empty>,
+    ) -> Result<Response<Self::StreamEventsStream>, Status> {
         let mut rx = self.broadcaster.subscribe();
         let output = async_stream::stream! {
             while let Ok(event) = rx.recv().await {
@@ -99,47 +107,78 @@ fn format_event_details(event: &RdevEvent) -> String {
 
 fn compare_system_info(old: &SystemInfo, new: &SystemInfo) -> String {
     let mut changes = Vec::new();
-    
+
     if old.system_info.directx_version != new.system_info.directx_version {
-        changes.push(format!("DirectX version changed: {} -> {}", old.system_info.directx_version, new.system_info.directx_version));
+        changes.push(format!(
+            "DirectX version changed: {} -> {}",
+            old.system_info.directx_version, new.system_info.directx_version
+        ));
     }
-    
+
     if old.system_info.os_version != new.system_info.os_version {
-        changes.push(format!("OS version changed: {} -> {}", old.system_info.os_version, new.system_info.os_version));
+        changes.push(format!(
+            "OS version changed: {} -> {}",
+            old.system_info.os_version, new.system_info.os_version
+        ));
     }
-    
+
     if old.system_info.memory_mb != new.system_info.memory_mb {
-        changes.push(format!("Memory changed: {} MB -> {} MB", old.system_info.memory_mb, new.system_info.memory_mb));
+        changes.push(format!(
+            "Memory changed: {} MB -> {} MB",
+            old.system_info.memory_mb, new.system_info.memory_mb
+        ));
     }
-    
+
     if old.network_info.local_ip != new.network_info.local_ip {
-        changes.push(format!("Local IP changed: {} -> {}", old.network_info.local_ip, new.network_info.local_ip));
+        changes.push(format!(
+            "Local IP changed: {} -> {}",
+            old.network_info.local_ip, new.network_info.local_ip
+        ));
     }
-    
+
     if old.network_info.public_ip != new.network_info.public_ip {
-        changes.push(format!("Public IP changed: {} -> {}", old.network_info.public_ip, new.network_info.public_ip));
+        changes.push(format!(
+            "Public IP changed: {} -> {}",
+            old.network_info.public_ip, new.network_info.public_ip
+        ));
     }
-    
+
     // Check for USB device changes
     if old.usb_input_devices.len() != new.usb_input_devices.len() {
-        changes.push(format!("USB devices count changed: {} -> {}", old.usb_input_devices.len(), new.usb_input_devices.len()));
+        changes.push(format!(
+            "USB devices count changed: {} -> {}",
+            old.usb_input_devices.len(),
+            new.usb_input_devices.len()
+        ));
     }
-    
+
     // Check for monitor changes
     if old.monitors.len() != new.monitors.len() {
-        changes.push(format!("Monitor count changed: {} -> {}", old.monitors.len(), new.monitors.len()));
+        changes.push(format!(
+            "Monitor count changed: {} -> {}",
+            old.monitors.len(),
+            new.monitors.len()
+        ));
     }
-    
+
     // Check for video card changes
     if old.video_cards.len() != new.video_cards.len() {
-        changes.push(format!("Video cards count changed: {} -> {}", old.video_cards.len(), new.video_cards.len()));
+        changes.push(format!(
+            "Video cards count changed: {} -> {}",
+            old.video_cards.len(),
+            new.video_cards.len()
+        ));
     }
-    
+
     // Check for PCI device changes
     if old.pci_devices.len() != new.pci_devices.len() {
-        changes.push(format!("PCI devices count changed: {} -> {}", old.pci_devices.len(), new.pci_devices.len()));
+        changes.push(format!(
+            "PCI devices count changed: {} -> {}",
+            old.pci_devices.len(),
+            new.pci_devices.len()
+        ));
     }
-    
+
     changes.join("\n")
 }
 
@@ -151,13 +190,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("--- System Info at Startup ---");
             println!("{}", info.to_formatted_string());
             println!("------------------------------");
-        },
+        }
         Err(e) => {
             eprintln!("[ERROR] Failed to collect system info at startup: {}", e);
         }
     }
     // -------------------------------------
-    
+
     let (broadcaster, _) = broadcast::channel(1024);
     let capturing = Arc::new(AtomicBool::new(false)); // Start with capturing off until client connects
     let listener_handle = Arc::new(Mutex::new(None));
@@ -258,7 +297,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let capturing_clone = Arc::clone(&capturing);
         tokio::spawn(async move {
             let mut last_system_info: Option<SystemInfo> = None;
-            
+
             loop {
                 if capturing_clone.load(Ordering::Relaxed) {
                     if let Ok(current_info) = SystemInfo::collect() {
@@ -268,14 +307,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if !changes.is_empty() {
                                 let change_event = Event {
                                     name: "SystemInfoChange".to_string(),
-                                    timestamp: Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+                                    timestamp: Local::now()
+                                        .format("%Y-%m-%d %H:%M:%S%.3f")
+                                        .to_string(),
                                     details: changes,
                                 };
-                                
+
                                 if let Err(e) = tx.send(change_event) {
                                     // Only log if it's not a "no receivers" error
                                     if !e.to_string().contains("channel closed") {
-                                        eprintln!("[ERROR] Failed to send system info change: {}", e);
+                                        eprintln!(
+                                            "[ERROR] Failed to send system info change: {}",
+                                            e
+                                        );
                                     }
                                 }
                             }
@@ -283,7 +327,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         last_system_info = Some(current_info);
                     }
                 }
-                
+
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             }
         });
